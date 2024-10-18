@@ -1,1 +1,2 @@
 # cybercup
+Design and implement a cloud-based, AI-powered Smart Traffic Management System that can analyze real-time traffic data from multiple sources (e.g., CCTV cameras, IoT sensors, GPS from vehicles, and mobile apps). The system should intelligently manage and control traffic signals, predict congestion, and suggest optimized routes for drivers. The solution should utilize cloud services for real-time data ingestion, processing, and storage, and AI algorithms for predictive analysis.
