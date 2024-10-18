@@ -1,1 +1,1 @@
-# cybercup-practice
+# cybercup
