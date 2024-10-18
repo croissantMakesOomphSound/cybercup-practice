@@ -2,29 +2,81 @@ import cv2
 from ultralytics import YOLO
 import torch
 from torchvision import models, transforms
-from PIL import Image  # Import PIL for image conversion
+from PIL import Image
+import numpy as np
+from sklearn.cluster import KMeans
+import math
+import os
+
+class Tracker:
+    def __init__(self):
+        # Store the center positions of the objects
+        self.center_points = {}
+        # Keep the count of the IDs
+        # each time a new object id detected, the count will increase by one
+        self.id_count = 0
+
+    def update(self, objects_rect):
+        # Objects boxes and ids
+        objects_bbs_ids = []
+
+        # Get center point of new object
+        for rect in objects_rect:
+            x, y, w, h = rect
+            cx = (x + x + w) // 2
+            cy = (y + y + h) // 2
+
+            # Find out if that object was detected already
+            same_object_detected = False
+            for id, pt in self.center_points.items():
+                dist = math.hypot(cx - pt[0], cy - pt[1])
+
+                if dist < 35:
+                    self.center_points[id] = (cx, cy)
+                    objects_bbs_ids.append([x, y, w, h, id])
+                    same_object_detected = True
+                    break
+
+            # New object is detected we assign the ID to that object
+            if same_object_detected is False:
+                self.center_points[self.id_count] = (cx, cy)
+                objects_bbs_ids.append([x, y, w, h, self.id_count])
+                self.id_count += 1
+
+        # Clean the dictionary by center points to remove IDS not used anymore
+        new_center_points = {}
+        for obj_bb_id in objects_bbs_ids:
+            _, _, _, _, object_id = obj_bb_id
+            center = self.center_points[object_id]
+            new_center_points[object_id] = center
+
+        # Update dictionary with IDs not used removed
+        self.center_points = new_center_points.copy()
+        return objects_bbs_ids
 
 class ObjectDetection:
-    count=0
     def __init__(self, input_video_path=None, output_video_path=None):
-        self.input_video_path = input_video_path if input_video_path else r'C:\Users\TMpub\OneDrive\Desktop\Recording 2024-10-17 214815.mp4'
-        self.output_video_path = output_video_path if output_video_path else 'annotated_output4.mp4'
+        self.input_video_path = input_video_path or 'input_video.mp4'
+        self.output_video_path = output_video_path or 'annotated_output.mp4'
+        self.tracker = Tracker()
+        self.features_list = []
+        self.kmeans = KMeans(n_clusters=5)
         self.vehicle_id_counter = 0
-        self.tracked_vehicles = {}
-        self.unique_features = set()
 
-    def run_model(self):
-        model = YOLO('yolov8n.pt')  
-        resnet_model = models.resnet50(pretrained=True)
-        resnet_model.eval()
-        feature_extractor = torch.nn.Sequential(*(list(resnet_model.children())[:-1]))
-        
-        preprocess = transforms.Compose([
+        # Load model and feature extractor
+        self.model = YOLO('yolov8n.pt')
+        self.resnet_model = models.resnet50(pretrained=True)
+        self.resnet_model.eval()
+        self.feature_extractor = torch.nn.Sequential(*(list(self.resnet_model.children())[:-1]))
+
+        # Preprocessing
+        self.preprocess = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
+    def run_model(self):
         cap = cv2.VideoCapture(self.input_video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -32,61 +84,37 @@ class ObjectDetection:
 
         out = cv2.VideoWriter(self.output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
 
-        desired_classes = {0, 2, 3, 5, 7}
-        confidence_threshold = 0.5
-
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
-            results = model(frame)
+            results = self.model(frame)
             filtered_results = []
+
             for result in results:
                 for box, score, class_id in zip(result.boxes.xyxy, result.boxes.conf, result.boxes.cls):
-                    if int(class_id) in desired_classes and score > confidence_threshold:
-                        filtered_results.append((box, score, class_id))
+                    if score > 0.5:  # Adjust this as needed
+                        filtered_results.append(box)
 
             detected_cars = []
-            for box, score, class_id in filtered_results:
+            for box in filtered_results:
                 x1, y1, x2, y2 = map(int, box)
-                label = f"{model.names[int(class_id)]}: {score:.2f}"
-
-                # Extract features for tracking
-                cropped_img = frame[y1:y2, x1:x2]
-                
-                # Convert to PIL Image
-                cropped_img_pil = Image.fromarray(cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB))
-
-                # Preprocess the image
-                input_tensor = preprocess(cropped_img_pil).unsqueeze(0)  # Add batch dimension
-                
-                with torch.no_grad():
-                    feature_vector = feature_extractor(input_tensor).flatten()
-
-                # Extract features for tracking
                 cropped_img = frame[y1:y2, x1:x2]
                 cropped_img_pil = Image.fromarray(cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB))
-                input_tensor = preprocess(cropped_img_pil).unsqueeze(0)
+                input_tensor = self.preprocess(cropped_img_pil).unsqueeze(0)
 
                 with torch.no_grad():
-                    feature_vector = feature_extractor(input_tensor).flatten().numpy()  # Convert to NumPy array
+                    feature_vector = self.feature_extractor(input_tensor).flatten().numpy()
 
-                # Check for uniqueness and update the count
-                feature_tuple = tuple(feature_vector)  # Convert to tuple for set operations
-                if feature_tuple not in self.unique_features:
-                    self.unique_features.add(feature_tuple)
-                    ObjectDetection.count += 1  # Increment the unique count
-                # Track vehicles
-                vehicle_id = self.track_vehicle((x1, y1, x2, y2), feature_vector)
-                
+                self.features_list.append(feature_vector)
+
+                vehicle_id = self.tracker.update([(x1, y1, x2 - x1, y2 - y1)])[0][-1]
+
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(frame, f"ID: {vehicle_id} {label}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                cv2.putText(frame, f"ID: {vehicle_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
                 detected_cars.append({'id': vehicle_id, 'bbox': (x1, y1, x2, y2)})
-
-            # Update vehicle positions and count unique vehicles
-            self.update_tracked_vehicles(detected_cars)
 
             out.write(frame)
 
@@ -94,48 +122,21 @@ class ObjectDetection:
         out.release()
         print(f"Annotated video saved to: {self.output_video_path}")
 
-    def track_vehicle(self, bbox, feature_vector):
-        vehicle_id = self.vehicle_id_counter
-        self.vehicle_id_counter += 1
-        self.tracked_vehicles[vehicle_id] = {'bbox': bbox, 'features': feature_vector}
-        return vehicle_id
+        # Perform clustering and update unique vehicle count
+        if len(self.features_list) > 0:
+            self.kmeans.fit(self.features_list)
+            ObjectDetection.count = len(set(self.kmeans.labels_))  # Count unique clusters
 
-    def update_tracked_vehicles(self, detected_cars):
-        for car in detected_cars:
-            car_id = car['id']
-            if car_id in self.tracked_vehicles:
-                self.tracked_vehicles[car_id]['bbox'] = car['bbox']
+        print(f"Annotated video saved to: {self.output_video_path}")
+        print(f"Total Unique Vehicles Detected: {ObjectDetection.count}")
 
+    
     @classmethod
     def get_count(cls):
-        return cls.count
-
-
+        return cls.count  # Returns the total number of unique cars detected
    
 
-    def extract_features(self, detected_cars, frame):
-        features = []
-        
-        for car in detected_cars:
-            # Get bounding box for the detected car
-            x1, y1, x2, y2 = car['bbox']  # Example format: [x1, y1, x2, y2]
-            
-            # Crop the detected car image
-            cropped_img = frame[y1:y2, x1:x2]
-            
-            # Convert to PIL Image
-            cropped_img_pil = Image.fromarray(cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB))
-            
-            # Preprocess the image
-            input_tensor = preprocess(cropped_img_pil).unsqueeze(0)  # Add batch dimension
-            
-            # Extract features
-            with torch.no_grad():
-                feature_vector = feature_extractor(input_tensor)
-                features.append(feature_vector.flatten())  # Flatten to 1D array
-                
-                return features
-
+    
 
 class AnnotatedVideoPlayer:
     def __init__(self, output_video_path):
@@ -223,6 +224,11 @@ class trafficlightsclock:
 
     def set_masterclock(self, masterclock):
         self.masterclock = masterclock
+
+    
+
+    
+
 
     
 
