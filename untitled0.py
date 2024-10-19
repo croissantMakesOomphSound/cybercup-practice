@@ -55,9 +55,12 @@ class Tracker:
         return objects_bbs_ids
 
 class ObjectDetection:
+    count = 0  # Class attribute to store the total count of vehicles
+
     def __init__(self, input_video_path=None, output_video_path=None):
-        self.input_video_path = input_video_path or 'input_video.mp4'
-        self.output_video_path = output_video_path or 'annotated_output.mp4'
+        self.input_video_path = input_video_path 
+        self.output_video_path = output_video_path
+        print("+++++++++++++++++++++++++++++++++++++++++++++++++++"+str(output_video_path))
         self.tracker = Tracker()
         self.features_list = []
         self.kmeans = KMeans(n_clusters=5)
@@ -79,62 +82,67 @@ class ObjectDetection:
     def run_model(self):
         cap = cv2.VideoCapture(self.input_video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_interval = int(fps * 0.5)
+        
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
+        
         out = cv2.VideoWriter(self.output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
-
+        
+        frame_count = 0
+        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-
-            results = self.model(frame)
-            filtered_results = []
-
-            for result in results:
-                for box, score, class_id in zip(result.boxes.xyxy, result.boxes.conf, result.boxes.cls):
-                    if score > 0.5:  # Adjust this as needed
-                        filtered_results.append(box)
-
+            
+            if frame_count % frame_interval == 0:
+                results = self.model(frame)
+                filtered_results = []
+                
+                for result in results:
+                    for box, score, class_id in zip(result.boxes.xyxy, result.boxes.conf, result.boxes.cls):
+                        if score > 0.5:
+                            filtered_results.append(box)
+                            
             detected_cars = []
             for box in filtered_results:
                 x1, y1, x2, y2 = map(int, box)
                 cropped_img = frame[y1:y2, x1:x2]
                 cropped_img_pil = Image.fromarray(cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB))
                 input_tensor = self.preprocess(cropped_img_pil).unsqueeze(0)
-
+                            
                 with torch.no_grad():
                     feature_vector = self.feature_extractor(input_tensor).flatten().numpy()
+                    
+                    self.features_list.append(feature_vector)
+                    
+                    vehicle_id = self.tracker.update([(x1, y1, x2 - x1, y2 - y1)])[0][-1]
+                    
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                    cv2.putText(frame, f"ID: {vehicle_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                    
+                    detected_cars.append({'id': vehicle_id, 'bbox': (x1, y1, x2, y2)})
+                    ObjectDetection.count += 1  # Increment count when a vehicle is detected
 
-                self.features_list.append(feature_vector)
-
-                vehicle_id = self.tracker.update([(x1, y1, x2 - x1, y2 - y1)])[0][-1]
-
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(frame, f"ID: {vehicle_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-
-                detected_cars.append({'id': vehicle_id, 'bbox': (x1, y1, x2, y2)})
-
+            frame_count += 1
             out.write(frame)
+            
 
         cap.release()
         out.release()
         print(f"Annotated video saved to: {self.output_video_path}")
 
-        # Perform clustering and update unique vehicle count
-        if len(self.features_list) > 0:
+        # Clustering to determine unique vehicles
+        if self.features_list:
             self.kmeans.fit(self.features_list)
-            ObjectDetection.count = len(set(self.kmeans.labels_))  # Count unique clusters
+            unique_vehicle_count = len(set(self.kmeans.labels_))  # Count unique clusters
+            print(f"Total Unique Vehicles Detected: {unique_vehicle_count}")
+            ObjectDetection.count = unique_vehicle_count  # Update the class count
 
-        print(f"Annotated video saved to: {self.output_video_path}")
-        print(f"Total Unique Vehicles Detected: {ObjectDetection.count}")
-
-    
     @classmethod
     def get_count(cls):
-        return cls.count  # Returns the total number of unique cars detected
-   
+        return cls.count  # Returns the total number of vehicles detected
 
     
 
@@ -224,11 +232,6 @@ class trafficlightsclock:
 
     def set_masterclock(self, masterclock):
         self.masterclock = masterclock
-
-    
-
-    
-
 
     
 
